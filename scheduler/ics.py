@@ -53,4 +53,3 @@ def export_schedule_to_ics(
 
     lines.append("END:VCALENDAR")
     output_path.write_text("\r\n".join(lines))
-
