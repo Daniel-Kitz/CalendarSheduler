@@ -1,0 +1,12 @@
+{
+    "timezone": "Europe/Berlin",
+    "horizon_days": 7,
+    "slot_minutes": 15,
+    "allowed_schedule_hours": [
+        {
+            "start": "06:00",
+            "end": "21:00"
+        }
+    ],
+    "max_work_hours_per_day": 12
+}
