@@ -1,13 +1,11 @@
 import csv
 import json
-import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from ortools.sat.python import cp_model
-import argparse
 
 
 @dataclass(frozen=True)
@@ -153,104 +151,6 @@ def load_distances_from_csv(path: Path) -> List[Distance]:
 def load_config(path: Path) -> Dict:
     with path.open() as f:
         return json.load(f)
-
-
-# --- CLI ------------------------------------------------------------------- #
-
-
-def _prompt_yes_no(question: str, default: bool = True) -> bool:
-    suffix = " [Y/n]: " if default else " [y/N]: "
-    while True:
-        choice = input(question + suffix).strip().lower()
-        if not choice:
-            return default
-        if choice in ("y", "yes"):
-            return True
-        if choice in ("n", "no"):
-            return False
-        print("Please answer y or n.")
-
-
-def _cli_main(argv: Optional[List[str]] = None) -> int:
-    parser = argparse.ArgumentParser(
-        description="Interactive CP-SAT calendar scheduler"
-    )
-    parser.add_argument("--tasks", type=Path, default=Path("scheduler/data/tasks.csv"))
-    parser.add_argument(
-        "--repeating", type=Path, default=Path("scheduler/data/repeating.csv")
-    )
-    parser.add_argument(
-        "--distances", type=Path, default=Path("scheduler/data/distances.csv")
-    )
-    parser.add_argument(
-        "--config", type=Path, default=Path("scheduler/data/config.json")
-    )
-    parser.add_argument(
-        "--start",
-        type=str,
-        default=None,
-        help='Optional start datetime "YYYY-MM-DD HH:MM" (defaults to now)',
-    )
-    args = parser.parse_args(argv)
-
-    print("Calendar Scheduler (OR-Tools CP-SAT)")
-    print("-----------------------------------")
-    use_defaults = (
-        _prompt_yes_no("Use default CSV/config paths?", default=True)
-        if argv is None
-        else True
-    )
-
-    if not use_defaults and argv is None:
-        args.tasks = Path(input(f"Tasks CSV [{args.tasks}]: ") or args.tasks)
-        args.repeating = Path(
-            input(f"Repeating CSV [{args.repeating}]: ") or args.repeating
-        )
-        args.distances = Path(
-            input(f"Distances CSV [{args.distances}]: ") or args.distances
-        )
-        args.config = Path(input(f"Config JSON [{args.config}]: ") or args.config)
-
-    start_dt: Optional[datetime] = None
-    if args.start:
-        start_dt = datetime.strptime(args.start, "%Y-%m-%d %H:%M")
-    elif not use_defaults and argv is None:
-        start_str = input("Start datetime (blank for now) [YYYY-MM-DD HH:MM]: ").strip()
-        if start_str:
-            start_dt = datetime.strptime(start_str, "%Y-%m-%d %H:%M")
-
-    try:
-        tasks = load_tasks_from_csv(args.tasks)
-        repeating = load_repeating_from_csv(args.repeating)
-        distances = load_distances_from_csv(args.distances)
-        config = load_config(args.config)
-    except FileNotFoundError as exc:
-        print(f"Missing file: {exc.filename}")
-        return 1
-    except Exception as exc:  # pylint: disable=broad-except
-        print(f"Failed to load inputs: {exc}")
-        return 1
-
-    try:
-        schedule = build_schedule(
-            tasks=tasks,
-            config=config,
-            repeating=repeating,
-            distances=distances,
-            start=start_dt,
-        )
-    except Exception as exc:  # pylint: disable=broad-except
-        print(f"Failed to build schedule: {exc}")
-        return 1
-
-    print("\nSchedule:")
-    for task in sorted(tasks, key=lambda t: schedule.get(t.id, datetime.max)):
-        start_time = schedule.get(task.id)
-        if start_time:
-            print(f"- {task.id}: {task.title} @ {start_time} ({task.location})")
-        else:
-            print(f"- {task.id}: {task.title} (unscheduled)")
-    return 0
 
 
 def build_schedule(
