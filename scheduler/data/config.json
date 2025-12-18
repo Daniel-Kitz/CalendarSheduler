@@ -8,5 +8,7 @@
             "end": "21:00"
         }
     ],
-    "max_work_hours_per_day": 12
+    "max_work_hours_per_day": 12,
+    "break_minutes": 5,
+    "default_location": "Home"
 }

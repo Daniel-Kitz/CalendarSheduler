@@ -22,13 +22,24 @@ def _banner() -> None:
 
 
 def _format_schedule_table(schedule, tasks):
-    headers = ["ID", "Title", "Location", "Start", "End", "Due", "Priority", "Hard Due"]
+    headers = [
+        "ID",
+        "Title",
+        "Location",
+        "Start",
+        "End (with travel)",
+        "Due",
+        "Priority",
+        "Hard Due",
+    ]
     rows = []
     fmt_dt = lambda dt: dt.strftime("%Y-%m-%d %H:%M")
-    for task in sorted(tasks, key=lambda t: schedule.get(t.id, datetime.max)):
-        start_time = schedule.get(task.id)
+    for task in sorted(tasks, key=lambda t: schedule.get(t.id, (datetime.max, 0))[0]):
+        start_time, effective_duration = schedule.get(
+            task.id, (None, task.duration_min)
+        )
         end_time = (
-            start_time + timedelta(minutes=task.duration_min) if start_time else None
+            start_time + timedelta(minutes=effective_duration) if start_time else None
         )
         rows.append(
             [

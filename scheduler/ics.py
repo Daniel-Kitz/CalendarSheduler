@@ -1,13 +1,13 @@
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Tuple
 from zoneinfo import ZoneInfo
 
 from scheduler.schedule import Task
 
 
 def export_schedule_to_ics(
-    schedule: Dict[int, datetime],
+    schedule: Dict[int, Tuple[datetime, int]],
     tasks: List[Task],
     config: Dict,
     output_path: Path,
@@ -30,12 +30,12 @@ def export_schedule_to_ics(
     ]
 
     task_map = {t.id: t for t in tasks}
-    for task_id, start_dt in schedule.items():
+    for task_id, (start_dt, effective_duration) in schedule.items():
         task = task_map.get(task_id)
         if not task:
             continue
         start_local = start_dt if start_dt.tzinfo else start_dt.replace(tzinfo=tzinfo)
-        end_local = start_local + timedelta(minutes=task.duration_min)
+        end_local = start_local + timedelta(minutes=effective_duration)
         start_str = start_local.strftime("%Y%m%dT%H%M%S")
         end_str = end_local.strftime("%Y%m%dT%H%M%S")
         lines.extend(

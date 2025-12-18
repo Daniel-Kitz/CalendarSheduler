@@ -159,22 +159,26 @@ def build_schedule(
     repeating: Optional[List[RepeatingTask]] = None,
     distances: Optional[List[Distance]] = None,
     start: Optional[datetime] = None,
-) -> Dict[int, datetime]:
+) -> Dict[int, Tuple[datetime, int]]:
     """
     Build a schedule using OR-Tools CP-SAT.
 
-    Returns a mapping of task id -> scheduled start datetime.
+    Returns a mapping of task id -> (scheduled start datetime, effective duration mins).
     Raises a ValueError when no feasible schedule can be built.
     """
 
-    start_date = start or datetime.now()
+    anchor = start or datetime.now()
+    origin = datetime.combine(anchor.date(), datetime.min.time())
+    earliest_offset = max(0, int((anchor - origin).total_seconds() // 60))
     repeating = repeating or []
     distances = distances or []
 
     horizon_days: int = config.get("horizon_days", 7)
     slot_minutes: int = config.get("slot_minutes", 15)
     allowed_hours = config.get("allowed_schedule_hours", [])
+    break_minutes: int = int(config.get("break_minutes", 0))
     max_work_minutes_per_day: int = int(config.get("max_work_hours_per_day", 12) * 60)
+    default_location: Optional[str] = config.get("default_location")
 
     minutes_per_day = 24 * 60
     horizon_minutes = horizon_days * minutes_per_day
@@ -187,8 +191,20 @@ def build_schedule(
             return 0
         return travel.get((loc_a, loc_b), travel.get((loc_b, loc_a), 0))
 
-    # Allowed starts by task.
+    # Allowed starts by task. We ensure starts are chosen so that a task plus
+    # its outgoing travel and break still ends within allowed hours.
     allowed_starts: Dict[int, List[int]] = {}
+    locations = list({t.location for t in tasks})
+    max_travel_out: Dict[int, int] = {}
+    for task in tasks:
+        max_travel_out[task.id] = max(
+            (
+                travel_time(task.location, loc)
+                for loc in locations
+                if loc != task.location
+            ),
+            default=0,
+        )
     for task in tasks:
         starts: List[int] = []
         for day in range(horizon_days):
@@ -196,8 +212,11 @@ def build_schedule(
             for window in allowed_hours:
                 day_start = base + _time_of_day_to_minutes(window["start"])
                 day_end = base + _time_of_day_to_minutes(window["end"])
-                latest_start = day_end - task.duration_min
+                buffer = task.duration_min + max_travel_out[task.id] + break_minutes
+                latest_start = day_end - buffer
                 current = day_start
+                if day == 0:
+                    current = max(current, earliest_offset)
                 while current <= latest_start:
                     starts.append(current)
                     current += slot_minutes
@@ -225,7 +244,7 @@ def build_schedule(
 
         # Deadlines.
         if task.due:
-            due_offset = int((task.due - start_date).total_seconds() // 60)
+            due_offset = int((task.due - origin).total_seconds() // 60)
             if task.hard_due:
                 model.Add(end_var <= due_offset)
             else:
@@ -239,7 +258,7 @@ def build_schedule(
         end_vars[task.id] = end_var
         day_vars[task.id] = day_var
 
-    # Non-overlap with travel time between tasks.
+    # Non-overlap with travel time and configured breaks between tasks.
     task_list = tasks.copy()
     for i in range(len(task_list)):
         for j in range(i + 1, len(task_list)):
@@ -248,12 +267,12 @@ def build_schedule(
             before = model.NewBoolVar(f"{ti.id}_before_{tj.id}")
             travel_ij = travel_time(ti.location, tj.location)
             travel_ji = travel_time(tj.location, ti.location)
-            model.Add(end_vars[ti.id] + travel_ij <= start_vars[tj.id]).OnlyEnforceIf(
-                before
-            )
-            model.Add(end_vars[tj.id] + travel_ji <= start_vars[ti.id]).OnlyEnforceIf(
-                before.Not()
-            )
+            model.Add(
+                end_vars[ti.id] + travel_ij + break_minutes <= start_vars[tj.id]
+            ).OnlyEnforceIf(before)
+            model.Add(
+                end_vars[tj.id] + travel_ji + break_minutes <= start_vars[ti.id]
+            ).OnlyEnforceIf(before.Not())
 
     # Dependencies.
     task_map = {task.id: task for task in tasks}
@@ -263,34 +282,36 @@ def build_schedule(
                 continue
             model.Add(start_vars[task.id] >= end_vars[dep_id])
 
-    # Daily work-hour limits.
+    # Daily work-hour limits (approx: task duration + configured break per task).
     for day in range(horizon_days):
         day_flags: List[Tuple[cp_model.BoolVar, int]] = []
         for task in tasks:
             flag = model.NewBoolVar(f"day_{day}_task_{task.id}")
             model.Add(day_vars[task.id] == day).OnlyEnforceIf(flag)
             model.Add(day_vars[task.id] != day).OnlyEnforceIf(flag.Not())
-            day_flags.append((flag, task.duration_min))
+            day_flags.append((flag, task.duration_min + break_minutes))
         model.Add(
             sum(flag * duration for flag, duration in day_flags)
             <= max_work_minutes_per_day
         )
 
     # Block repeating tasks as fixed intervals.
-    occurrences = _generate_repeating_occurrences(repeating, start_date, horizon_days)
+    occurrences = _generate_repeating_occurrences(repeating, origin, horizon_days)
     for occ_id, occ_start_dt, occ_end_dt in occurrences:
-        occ_start = int((occ_start_dt - start_date).total_seconds() // 60)
-        occ_end = int((occ_end_dt - start_date).total_seconds() // 60)
+        occ_start = int((occ_start_dt - origin).total_seconds() // 60)
+        occ_end = int((occ_end_dt - origin).total_seconds() // 60)
         occ_task = task_map.get(occ_id)
         occ_location = occ_task.location if occ_task else ""
         for task in tasks:
             before = model.NewBoolVar(f"occ_{occ_id}_before_task_{task.id}")
             travel_1 = travel_time(task.location, occ_location)
             travel_2 = travel_time(occ_location, task.location)
-            model.Add(occ_end + travel_2 <= start_vars[task.id]).OnlyEnforceIf(before)
-            model.Add(end_vars[task.id] + travel_1 <= occ_start).OnlyEnforceIf(
-                before.Not()
-            )
+            model.Add(
+                occ_end + travel_2 + break_minutes <= start_vars[task.id]
+            ).OnlyEnforceIf(before)
+            model.Add(
+                end_vars[task.id] + travel_1 + break_minutes <= occ_start
+            ).OnlyEnforceIf(before.Not())
 
     # Objective: minimize total lateness and prefer earlier completion.
     total_end = model.NewIntVar(0, horizon_minutes, "total_end")
@@ -305,9 +326,33 @@ def build_schedule(
     if result not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         raise ValueError("No feasible schedule found with given constraints")
 
-    schedule: Dict[int, datetime] = {}
+    schedule: Dict[int, Tuple[datetime, int]] = {}
+    starts_minutes: Dict[int, int] = {}
     for task in tasks:
         start_minute = solver.Value(start_vars[task.id])
-        schedule[task.id] = start_date + timedelta(minutes=start_minute)
+        starts_minutes[task.id] = start_minute
+        schedule[task.id] = (
+            origin + timedelta(minutes=start_minute),
+            task.duration_min,
+        )
+
+    # Compute effective durations including travel once (outbound) and break.
+    ordered = sorted(tasks, key=lambda t: starts_minutes[t.id])
+    for idx, task in enumerate(ordered):
+        start_min = starts_minutes[task.id]
+        prev_task = ordered[idx - 1] if idx > 0 else None
+        next_task = ordered[idx + 1] if idx + 1 < len(ordered) else None
+
+        # Only charge travel once between tasks: attach outbound to the current task.
+        travel_out = travel_time(task.location, next_task.location) if next_task else 0
+        if not next_task and default_location:
+            travel_out = max(travel_out, travel_time(task.location, default_location))
+
+        travel_in = 0
+        if not prev_task and default_location:
+            travel_in = travel_time(default_location, task.location)
+
+        effective_duration = task.duration_min + travel_in + travel_out + break_minutes
+        schedule[task.id] = (origin + timedelta(minutes=start_min), effective_duration)
 
     return schedule
